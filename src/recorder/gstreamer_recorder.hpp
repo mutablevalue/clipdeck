@@ -1,11 +1,13 @@
 #pragma once
 
 #include "clip_muxer.hpp"
-#include "encoded_ring_buffer.hpp"
 #include "recorder_backend.hpp"
 
 #include <atomic>
+#include <cstdint>
+#include <filesystem>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -24,25 +26,40 @@ public:
   void Stop() override;
   bool SaveClip() override;
   [[nodiscard]] RecorderStatus Status() const override;
-  void HandleSample(void *sample);
+
+#if defined(CLIPDECK_ENABLE_RECORDER_TEST_HOOKS)
+  void SetPortalTestTargetObject(int fd, std::uint32_t node_id,
+                                 std::string target_object);
+  void SetPortalTestPath(int fd, std::uint32_t node_id);
+  [[nodiscard]] std::string BuildPipelineDescriptionForTest() const;
+#endif
 
 private:
   void MonitorBus(std::stop_token stop_token);
+  void CleanSegmentDirectory() const;
+  void SplitCurrentSegment() const;
+  [[nodiscard]] std::vector<std::filesystem::path> SelectSegmentsForClip() const;
+  [[nodiscard]] std::size_t SegmentBytes() const;
+  [[nodiscard]] std::size_t SegmentCount() const;
   [[nodiscard]] std::string BuildPipelineDescription() const;
   void SetMessage(std::string message, bool healthy);
 
   RecorderConfig config_;
-  EncodedRingBuffer ring_buffer_;
   ClipMuxer muxer_;
+  std::filesystem::path segment_directory_;
   mutable std::mutex state_mutex_;
-  mutable std::mutex initialization_mutex_;
-  std::vector<EncodedFragment> initialization_fragments_;
+  std::mutex save_mutex_;
   std::atomic_bool running_{false};
   bool healthy_ = false;
   std::string message_ = "not started";
   void *pipeline_ = nullptr;
-  void *appsink_ = nullptr;
+  void *splitmux_sink_ = nullptr;
   void *bus_ = nullptr;
+  void *portal_connection_ = nullptr;
+  int portal_fd_ = -1;
+  std::uint32_t portal_node_id_ = 0;
+  std::optional<std::string> portal_target_object_;
+  std::string portal_session_handle_;
   std::jthread bus_thread_;
 };
 

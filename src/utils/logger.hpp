@@ -2,65 +2,53 @@
 
 #include <chrono>
 #include <ctime>
+#include <filesystem>
 #include <iomanip>
+#include <fstream>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <string_view>
 
+namespace clipdeck {
+
 enum class LogLevel { Debug, Info, Warning, Error };
 
-class Log {
+class Logger {
 public:
-  Log(LogLevel level, std::string_view context, std::string_view message) {
-    std::ostream &output_stream = GetOutputStream(level);
+  static Logger &Instance();
 
-    output_stream << "[" << GetCurrentTime() << "] "
-                  << "[" << GetLogLevelName(level) << "] "
-                  << "[" << context << "] " << message << '\n'
-                  << std::flush;
-  }
+  Logger(const Logger &) = delete;
+  Logger &operator=(const Logger &) = delete;
+
+  void SetLogFile(const std::filesystem::path &path);
+  void ClearLogFile();
+
+  void Write(LogLevel level, std::string_view context, std::string_view message);
+  void Debug(std::string_view context, std::string_view message);
+  void Info(std::string_view context, std::string_view message);
+  void Warning(std::string_view context, std::string_view message);
+  void Error(std::string_view context, std::string_view message);
 
 private:
-  static std::ostream &GetOutputStream(LogLevel level) {
-    if (level == LogLevel::Error) {
-      return std::cerr;
-    }
+  Logger() = default;
 
-    return std::cout;
-  }
+  [[nodiscard]] std::ostream &OutputStream(LogLevel level);
+  [[nodiscard]] static std::string_view GetLogLevelName(LogLevel level);
+  [[nodiscard]] static std::string GetCurrentTime();
 
-  static std::string_view GetLogLevelName(LogLevel level) {
-    switch (level) {
-    case LogLevel::Debug:
-      return "DEBUG";
-    case LogLevel::Info:
-      return "INFO";
-    case LogLevel::Warning:
-      return "WARN";
-    case LogLevel::Error:
-      return "ERROR";
-    }
-
-    return "UNKNOWN";
-  }
-
-  static std::string GetCurrentTime() {
-    const auto current_time_point = std::chrono::system_clock::now();
-    const auto current_time =
-        std::chrono::system_clock::to_time_t(current_time_point);
-
-    std::tm local_time{};
-
-#if defined(_WIN32)
-    localtime_s(&local_time, &current_time);
-#else
-    localtime_r(&current_time, &local_time);
-#endif
-
-    std::ostringstream time_stream;
-    time_stream << std::put_time(&local_time, "%Y-%m-%d %H:%M:%S");
-
-    return time_stream.str();
-  }
+  std::mutex mutex_;
+  std::ofstream file_stream_;
 };
+
+inline void Log(LogLevel level, std::string_view context,
+                std::string_view message) {
+  Logger::Instance().Write(level, context, message);
+}
+
+} // namespace clipdeck
+
+using clipdeck::Log;
+using clipdeck::LogLevel;
+using clipdeck::Logger;

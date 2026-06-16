@@ -56,6 +56,7 @@ void DaemonListener::Stop() {
 
   if (listener_thread_.joinable()) {
     listener_thread_.request_stop();
+    listener_thread_.join();
   }
 
   Log(LogLevel::Info, kListenerContext, "Stopped keybind listener.");
@@ -104,6 +105,9 @@ void DaemonListener::ListenLoop(std::stop_token stop_token) {
 
       if (bytes_read == sizeof(event)) {
         HandleInputEvent(event.type, event.code, event.value);
+      } else if (bytes_read < 0 && errno != EAGAIN && errno != EWOULDBLOCK &&
+                 errno != EINTR) {
+        ResetKeyState();
       }
     }
   }
@@ -113,6 +117,7 @@ void DaemonListener::ListenLoop(std::stop_token stop_token) {
 
 void DaemonListener::OpenInputDevices() {
   input_devices_.clear();
+  ResetKeyState();
   int failed_devices = 0;
   std::string last_error;
 
@@ -185,6 +190,11 @@ void DaemonListener::HandleInputEvent(int event_type, int event_code,
       keybind_callback_("save");
     }
   }
+}
+
+void DaemonListener::ResetKeyState() {
+  pressed_key_codes_.clear();
+  save_keybind_armed_ = true;
 }
 
 bool DaemonListener::SaveKeybindIsPressed() const {

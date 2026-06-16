@@ -22,8 +22,10 @@ TEST(SettingsStoreTest, LoadsDefaultsWhenFileDoesNotExist) {
   EXPECT_EQ(settings.clip_length_seconds, 30);
   EXPECT_EQ(settings.buffer_safety_seconds, 5);
   EXPECT_EQ(settings.save_keybind, "Ctrl+Z+P");
-  EXPECT_EQ(settings.clip_directory, std::filesystem::path("output/clips"));
+  EXPECT_EQ(settings.clip_directory, settings_path.parent_path() / "clips");
   EXPECT_EQ(settings.capture_video_source, "portal");
+  EXPECT_TRUE(settings.capture_audio_enabled);
+  EXPECT_EQ(settings.capture_audio_source, clipdeck::kAutomaticAudioSource);
   EXPECT_EQ(settings.capture_width, 1920);
   EXPECT_EQ(settings.capture_height, 1080);
   EXPECT_EQ(settings.capture_fps, 60);
@@ -42,6 +44,7 @@ TEST(SettingsStoreTest, SavesAndLoadsSettings) {
   saved_settings.save_keybind = "Ctrl+Alt+P";
   saved_settings.clip_directory = "/tmp/clipdeck-clips";
   saved_settings.capture_video_source = "42";
+  saved_settings.capture_audio_enabled = false;
   saved_settings.capture_audio_source = "alsa_output.test.monitor";
   saved_settings.capture_width = 1280;
   saved_settings.capture_height = 720;
@@ -58,7 +61,8 @@ TEST(SettingsStoreTest, SavesAndLoadsSettings) {
   EXPECT_EQ(loaded_settings.buffer_safety_seconds, 8);
   EXPECT_EQ(loaded_settings.save_keybind, "Ctrl+Alt+P");
   EXPECT_EQ(loaded_settings.clip_directory, "/tmp/clipdeck-clips");
-  EXPECT_EQ(loaded_settings.capture_video_source, "42");
+  EXPECT_EQ(loaded_settings.capture_video_source, "portal");
+  EXPECT_FALSE(loaded_settings.capture_audio_enabled);
   EXPECT_EQ(loaded_settings.capture_audio_source,
             "alsa_output.test.monitor");
   EXPECT_EQ(loaded_settings.capture_width, 1280);

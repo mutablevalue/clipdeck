@@ -1,7 +1,9 @@
 #include "settings_store.hpp"
 
+#include "../utils/app_error.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/number_parser.hpp"
+#include "../utils/runtime_paths.hpp"
 
 #include <fstream>
 #include <string>
@@ -22,17 +24,41 @@ std::pair<std::string, std::string> SplitSettingLine(std::string_view line) {
           std::string(line.substr(separator + 1))};
 }
 
+std::filesystem::path ResolveStoredPath(std::string_view value) {
+  std::filesystem::path path(value);
+  if (path.is_absolute()) {
+    return path;
+  }
+
+  return clipdeck::ProjectRootDirectory() / path;
+}
+
+bool ParseBoolean(std::string_view value, bool &parsed) {
+  if (value == "true" || value == "1" || value == "on") {
+    parsed = true;
+    return true;
+  }
+
+  if (value == "false" || value == "0" || value == "off") {
+    parsed = false;
+    return true;
+  }
+
+  return false;
+}
+
 } // namespace
 
 namespace clipdeck {
 
-SettingsStore::SettingsStore() : SettingsStore("output/settings.conf") {}
+SettingsStore::SettingsStore() : SettingsStore(SettingsPath()) {}
 
 SettingsStore::SettingsStore(std::filesystem::path settings_path)
     : settings_path_(std::move(settings_path)) {}
 
 ClipDeckSettings SettingsStore::Load() const {
   ClipDeckSettings settings;
+  settings.clip_directory = settings_path_.parent_path() / "clips";
   std::ifstream input(settings_path_);
 
   if (!input.is_open()) {
@@ -65,17 +91,32 @@ ClipDeckSettings SettingsStore::Load() const {
     }
 
     if (key == "clip_directory" && !value.empty()) {
-      settings.clip_directory = value;
+      settings.clip_directory = ResolveStoredPath(value);
       continue;
     }
 
     if (key == "capture_video_source" && !value.empty()) {
-      settings.capture_video_source = value;
+      if (value == "portal") {
+        settings.capture_video_source = value;
+      } else {
+        settings.capture_video_source = "portal";
+        Log(LogLevel::Warning, kSettingsContext,
+            "Ignored non-portal video source from settings; native capture is screen-only.");
+      }
       continue;
     }
 
     if (key == "capture_audio_source") {
-      settings.capture_audio_source = value;
+      settings.capture_audio_source =
+          value.empty() ? std::string(kAutomaticAudioSource) : value;
+      continue;
+    }
+
+    if (key == "capture_audio_enabled") {
+      bool enabled = true;
+      if (ParseBoolean(value, enabled)) {
+        settings.capture_audio_enabled = enabled;
+      }
       continue;
     }
 
@@ -134,15 +175,17 @@ bool SettingsStore::Save(const ClipDeckSettings &settings) const {
   std::filesystem::create_directories(settings_path_.parent_path(), error);
 
   if (error) {
-    Log(LogLevel::Error, kSettingsContext,
-        "Failed to create settings directory: " + error.message());
+    HandleError(MakeError("settings_directory", kSettingsContext,
+                          "Failed to create settings directory: " +
+                              error.message()));
     return false;
   }
 
   std::ofstream output(settings_path_, std::ios::trunc);
 
   if (!output.is_open()) {
-    Log(LogLevel::Error, kSettingsContext, "Failed to open settings file.");
+    HandleError(MakeError("settings_open", kSettingsContext,
+                          "Failed to open settings file."));
     return false;
   }
 
@@ -151,6 +194,8 @@ bool SettingsStore::Save(const ClipDeckSettings &settings) const {
   output << "save_keybind=" << settings.save_keybind << '\n';
   output << "clip_directory=" << settings.clip_directory.string() << '\n';
   output << "capture_video_source=" << settings.capture_video_source << '\n';
+  output << "capture_audio_enabled="
+         << (settings.capture_audio_enabled ? "true" : "false") << '\n';
   output << "capture_audio_source=" << settings.capture_audio_source << '\n';
   output << "capture_width=" << settings.capture_width << '\n';
   output << "capture_height=" << settings.capture_height << '\n';

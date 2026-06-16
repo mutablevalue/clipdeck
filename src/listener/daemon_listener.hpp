@@ -36,6 +36,7 @@ private:
   void ListenLoop(std::stop_token stop_token);
   void OpenInputDevices();
   void HandleInputEvent(int event_type, int event_code, int event_value);
+  void ResetKeyState();
   [[nodiscard]] bool SaveKeybindIsPressed() const;
 
   ListenerConfig config_;

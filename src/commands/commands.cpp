@@ -3,6 +3,7 @@
 #include "../core.hpp"
 #include "../listener/keybind.hpp"
 #include "../listener/keybind_capture.hpp"
+#include "../recorder/recorder_setup.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/number_parser.hpp"
 
@@ -17,6 +18,32 @@ constexpr std::string_view kCommandContext = "commands";
 
 bool HasExtraArguments(int argc, int expected_count) {
   return argc != expected_count;
+}
+
+void PrintAudioDevices() {
+  const auto sources = clipdeck::AvailableAudioCaptureSources();
+  bool found_monitor = false;
+
+  for (const auto &source : sources) {
+    if (!source.monitor) {
+      continue;
+    }
+
+    if (!found_monitor) {
+      Log(LogLevel::Info, kCommandContext,
+          "Available output audio monitor sources:");
+      found_monitor = true;
+    }
+
+    Log(LogLevel::Info, kCommandContext,
+        "  " + source.name +
+            (source.default_output_monitor ? " (default output)" : ""));
+  }
+
+  if (!found_monitor) {
+    Log(LogLevel::Warning, kCommandContext,
+        "No output monitor sources were found from pactl. Make sure PipeWire/PulseAudio is running.");
+  }
 }
 
 } // namespace
@@ -233,7 +260,13 @@ int CommandHandler::RunSettingsCommand(int argc, char *argv[]) const {
   if (setting == "video-source") {
     if (argc != 4) {
       Log(LogLevel::Error, kCommandContext,
-          "Usage: clipdeck settings video-source <portal|pipewire-path>");
+          "Usage: clipdeck settings video-source portal");
+      return 1;
+    }
+
+    if (std::string_view(argv[3]) != "portal") {
+      Log(LogLevel::Error, kCommandContext,
+          "Native video capture is screen-only. Use: clipdeck settings video-source portal");
       return 1;
     }
 
@@ -250,6 +283,39 @@ int CommandHandler::RunSettingsCommand(int argc, char *argv[]) const {
 
     clipdeck.SetCaptureAudioSource(argv[3]);
     return 0;
+  }
+
+  if (setting == "audio") {
+    if (argc != 4) {
+      Log(LogLevel::Error, kCommandContext,
+          "Usage: clipdeck settings audio <on|off|auto|devices>");
+      return 1;
+    }
+
+    const std::string mode = argv[3];
+    if (mode == "devices" || mode == "list") {
+      PrintAudioDevices();
+      return 0;
+    }
+
+    if (mode == "on") {
+      clipdeck.SetCaptureAudioEnabled(true);
+      return 0;
+    }
+
+    if (mode == "off") {
+      clipdeck.SetCaptureAudioEnabled(false);
+      return 0;
+    }
+
+    if (mode == "auto") {
+      clipdeck.SetCaptureAudioAuto();
+      return 0;
+    }
+
+    Log(LogLevel::Error, kCommandContext,
+        "Usage: clipdeck settings audio <on|off|auto|devices>");
+    return 1;
   }
 
   if (setting == "resolution") {
@@ -404,7 +470,11 @@ void CommandHandler::PrintHelp() const {
   Log(LogLevel::Info, kCommandContext,
       "  settings output <directory>   Set the clip save directory");
   Log(LogLevel::Info, kCommandContext,
-      "  settings video-source <src>   Set PipeWire video source");
+      "  settings video-source portal  Use screen capture through desktop portal");
+  Log(LogLevel::Info, kCommandContext,
+      "  settings audio <on|off|auto>  Enable, disable, or auto-select output audio");
+  Log(LogLevel::Info, kCommandContext,
+      "  settings audio devices        List output audio monitor sources");
   Log(LogLevel::Info, kCommandContext,
       "  settings audio-source <src>   Set desktop audio monitor source");
   Log(LogLevel::Info, kCommandContext,

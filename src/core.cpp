@@ -1,17 +1,21 @@
 #include "core.hpp"
 
+#include "recorder/clip_muxer.hpp"
 #include "recorder/gstreamer_recorder.hpp"
 #include "recorder/recorder_backend.hpp"
 #include "recorder/recorder_setup.hpp"
+#include "recorder/segment_file.hpp"
 #include "utils/logger.hpp"
 #include "utils/process.hpp"
 #include "utils/runtime_paths.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <csignal>
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -75,6 +79,123 @@ void PrintRecorderStatusFile() {
   }
 }
 
+void PrintRetainedSegmentStatus(int clip_length_seconds) {
+  const auto segments = clipdeck::SelectRecentSegmentsForDuration(
+      clipdeck::SegmentDirectory(), std::chrono::seconds(clip_length_seconds));
+  if (segments.empty()) {
+    return;
+  }
+
+  std::uintmax_t bytes = 0;
+  for (const auto &segment : segments) {
+    std::error_code error;
+    bytes += std::filesystem::file_size(segment, error);
+  }
+
+  Log(LogLevel::Info, kCoreContext,
+      "Recorder retained_segments=" + std::to_string(segments.size()) + ".");
+  Log(LogLevel::Info, kCoreContext,
+      "Recorder retained_segment_bytes=" + std::to_string(bytes) + ".");
+}
+
+std::optional<std::filesystem::path> NewestClipModifiedAfter(
+    const std::filesystem::path &clip_directory,
+    std::filesystem::file_time_type threshold) {
+  std::optional<std::filesystem::path> newest_clip;
+  auto newest_time = std::filesystem::file_time_type::min();
+  std::error_code error;
+
+  if (!std::filesystem::exists(clip_directory, error)) {
+    return std::nullopt;
+  }
+
+  for (const auto &entry :
+       std::filesystem::directory_iterator(clip_directory, error)) {
+    if (error || !entry.is_regular_file() || entry.path().extension() != ".mp4") {
+      continue;
+    }
+
+    std::error_code size_error;
+    if (entry.file_size(size_error) == 0 || size_error) {
+      continue;
+    }
+
+    std::error_code time_error;
+    const auto modified_time = entry.last_write_time(time_error);
+    if (time_error || modified_time < threshold || modified_time < newest_time) {
+      continue;
+    }
+
+    newest_clip = entry.path();
+    newest_time = modified_time;
+  }
+
+  return newest_clip;
+}
+
+std::optional<std::filesystem::path> WaitForPublishedClip(
+    const std::filesystem::path &clip_directory,
+    std::filesystem::file_time_type threshold,
+    std::chrono::seconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (auto clip = NewestClipModifiedAfter(clip_directory, threshold);
+        clip.has_value()) {
+      return clip;
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+  }
+
+  return std::nullopt;
+}
+
+bool WaitForProcessExit(pid_t pid, std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (!clipdeck::IsProcessRunning(pid)) {
+      return true;
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+
+  return !clipdeck::IsProcessRunning(pid);
+}
+
+bool StopClipDeckProcess(pid_t pid, std::string_view source) {
+  if (!clipdeck::IsProcessRunning(pid)) {
+    return true;
+  }
+
+  if (!clipdeck::RequestProcessGroupStop(pid)) {
+    Log(LogLevel::Error, kCoreContext,
+        "Failed to stop ClipDeck listener " + std::string(source) +
+            " pid " + std::to_string(pid) + ".");
+    return false;
+  }
+
+  if (WaitForProcessExit(pid, std::chrono::seconds(5))) {
+    Log(LogLevel::Info, kCoreContext,
+        "Stopped ClipDeck listener " + std::string(source) + " pid " +
+            std::to_string(pid) + ".");
+    return true;
+  }
+
+  Log(LogLevel::Warning, kCoreContext,
+      "ClipDeck listener " + std::string(source) + " pid " +
+          std::to_string(pid) +
+          " did not exit after SIGTERM; sending SIGKILL.");
+
+  if (!clipdeck::ForceProcessGroupStop(pid)) {
+    return false;
+  }
+
+  return WaitForProcessExit(pid, std::chrono::seconds(2));
+}
+
 } // namespace
 
 namespace clipdeck {
@@ -119,6 +240,7 @@ void ClipDeckCore::Start() {
 
   setsid();
   RedirectStandardStreams(DaemonLogPath());
+  Logger::Instance().SetLogFile(DaemonLogPath());
 
   ClipDeckCore daemon_core;
   const int exit_code = daemon_core.RunListener();
@@ -139,6 +261,10 @@ int ClipDeckCore::RunListener() {
 
   auto recorder =
       std::make_unique<GStreamerRecorder>(BuildRecorderConfig(settings_));
+  WriteRecorderStatusFile(RecorderStatus{.running = false,
+                                         .healthy = false,
+                                         .backend = "native",
+                                         .message = "starting"});
   if (!recorder->Start()) {
     Log(LogLevel::Warning, kCoreContext,
         "Native recorder did not start. Keybinds will still listen, but saves will fail until the recorder is healthy.");
@@ -191,41 +317,34 @@ void ClipDeckCore::Restart() {
 void ClipDeckCore::Stop() {
   const auto pid_file = PidFilePath();
   const auto pid = ReadPidFile(pid_file);
+  bool stopped_any = false;
 
-  if (!pid.has_value()) {
-    Log(LogLevel::Info, kCoreContext, "ClipDeck listener is not running.");
-    return;
+  if (pid.has_value()) {
+    if (IsProcessRunning(pid.value())) {
+      stopped_any = StopClipDeckProcess(pid.value(), "pid-file") || stopped_any;
+    } else {
+      Log(LogLevel::Warning, kCoreContext,
+          "Removed stale ClipDeck pid file for pid " +
+              std::to_string(pid.value()) + ".");
+    }
   }
 
-  if (!IsProcessRunning(pid.value())) {
-    RemovePidFile(pid_file);
-    Log(LogLevel::Warning, kCoreContext,
-        "Removed stale ClipDeck pid file for pid " + std::to_string(pid.value()) +
-            ".");
-    return;
-  }
-
-  if (!RequestProcessStop(pid.value())) {
-    Log(LogLevel::Error, kCoreContext,
-        "Failed to stop ClipDeck listener with pid " +
-            std::to_string(pid.value()) + ".");
-    return;
-  }
-
-  for (int attempt = 0; attempt < 20; ++attempt) {
-    if (!IsProcessRunning(pid.value())) {
-      RemovePidFile(pid_file);
-      Log(LogLevel::Info, kCoreContext,
-          "Stopped ClipDeck listener pid " + std::to_string(pid.value()) + ".");
-      return;
+  for (const pid_t orphan_pid : FindSiblingProcessesByExecutable()) {
+    if (pid.has_value() && orphan_pid == pid.value()) {
+      continue;
     }
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    stopped_any =
+        StopClipDeckProcess(orphan_pid, "orphan") || stopped_any;
   }
 
-  Log(LogLevel::Info, kCoreContext,
-      "Stop requested for ClipDeck listener pid " + std::to_string(pid.value()) +
-          "; process is still shutting down.");
+  RemovePidFile(pid_file);
+  std::error_code error;
+  std::filesystem::remove(RecorderStatusPath(), error);
+
+  if (!stopped_any) {
+    Log(LogLevel::Info, kCoreContext, "ClipDeck listener is not running.");
+  }
 }
 
 bool ClipDeckCore::Save() {
@@ -233,11 +352,43 @@ bool ClipDeckCore::Save() {
 
   const auto pid = ReadPidFile(PidFilePath());
   if (!pid.has_value() || !IsProcessRunning(pid.value())) {
-    Log(LogLevel::Error, kCoreContext,
-        "ClipDeck daemon is not running. Start it before saving from the native memory buffer.");
-    return false;
+    const auto segments = SelectRecentSegmentsForDuration(
+        SegmentDirectory(), std::chrono::seconds(settings_.clip_length_seconds));
+    if (segments.empty()) {
+      Log(LogLevel::Error, kCoreContext,
+          "ClipDeck daemon is not running and no retained recorder segments are available.");
+      return false;
+    }
+
+    ClipMuxer muxer(settings_.clip_directory);
+    const auto recorder_config = BuildRecorderConfig(settings_);
+    const auto clip_path = muxer.WriteClipFromSegments(
+        segments, ClipMuxerOptions{.target_duration =
+                                       std::chrono::seconds(
+                                           settings_.clip_length_seconds),
+                                   .width = recorder_config.width,
+                                   .height = recorder_config.height,
+                                   .fps = recorder_config.fps,
+                                   .video_bitrate_kbps =
+                                       recorder_config.video_bitrate_kbps,
+                                   .audio_bitrate_kbps =
+                                       recorder_config.audio_bitrate_kbps,
+                                   .audio_enabled =
+                                       recorder_config.audio_enabled});
+    if (!clip_path.has_value()) {
+      Log(LogLevel::Error, kCoreContext,
+          "Failed to save a clip from retained recorder segments.");
+      return false;
+    }
+
+    Log(LogLevel::Info, kCoreContext,
+        "Stored clip from retained recorder segments: " +
+            clip_path.value().string() + ".");
+    return true;
   }
 
+  const auto save_requested_at =
+      std::filesystem::file_time_type::clock::now() - std::chrono::seconds(1);
   if (kill(pid.value(), SIGUSR1) != 0) {
     Log(LogLevel::Error, kCoreContext,
         "Failed to request native clip save from daemon pid " +
@@ -248,7 +399,21 @@ bool ClipDeckCore::Save() {
   Log(LogLevel::Info, kCoreContext,
       "Requested native clip save from daemon pid " +
           std::to_string(pid.value()) + ".");
-  return true;
+
+  const auto timeout =
+      std::chrono::seconds(std::max(30, settings_.clip_length_seconds * 3));
+  const auto clip =
+      WaitForPublishedClip(settings_.clip_directory, save_requested_at, timeout);
+  if (clip.has_value()) {
+    Log(LogLevel::Info, kCoreContext,
+        "Saved clip: " + clip.value().string() + ".");
+    return true;
+  }
+
+  Log(LogLevel::Error, kCoreContext,
+      "Timed out waiting for the daemon to publish a clip. Check " +
+          DaemonLogPath().string() + " for the save failure.");
+  return false;
 }
 
 void ClipDeckCore::Status() {
@@ -277,6 +442,7 @@ void ClipDeckCore::Status() {
         "Recorder backend: " + recorder_status.backend + ".");
     Log(LogLevel::Info, kCoreContext,
         "Recorder status: stopped.");
+    PrintRetainedSegmentStatus(settings_.clip_length_seconds);
   }
 }
 
@@ -316,10 +482,16 @@ void ClipDeckCore::ShowSettings() const {
   Log(LogLevel::Info, kCoreContext,
       "Capture video source: " + settings_.capture_video_source + ".");
   Log(LogLevel::Info, kCoreContext,
-      "Capture audio source: " +
-          (settings_.capture_audio_source.empty()
-               ? std::string("<none>")
-               : settings_.capture_audio_source) +
+      "Capture audio: " +
+          std::string(settings_.capture_audio_enabled ? "enabled" : "disabled") +
+          ".");
+  const auto resolved_audio_source = ResolveCaptureAudioSource(settings_);
+  Log(LogLevel::Info, kCoreContext,
+      "Capture audio source: " + settings_.capture_audio_source + ".");
+  Log(LogLevel::Info, kCoreContext,
+      "Resolved audio source: " +
+          (resolved_audio_source.has_value() ? resolved_audio_source.value()
+                                             : std::string("<none>")) +
           ".");
   Log(LogLevel::Info, kCoreContext,
       "Capture size: " + std::to_string(settings_.capture_width) + "x" +
@@ -346,7 +518,9 @@ void ClipDeckCore::SetClipLength(int seconds) {
 
 void ClipDeckCore::SetClipDirectory(
     const std::filesystem::path &clip_directory) {
-  settings_.clip_directory = clip_directory;
+  settings_.clip_directory = clip_directory.is_absolute()
+                                 ? clip_directory
+                                 : ProjectRootDirectory() / clip_directory;
 
   std::error_code error;
   std::filesystem::create_directories(settings_.clip_directory, error);
@@ -382,6 +556,12 @@ void ClipDeckCore::SetBufferSafety(int seconds) {
 }
 
 void ClipDeckCore::SetCaptureVideoSource(std::string source) {
+  if (source != "portal") {
+    Log(LogLevel::Error, kCoreContext,
+        "Native video capture is screen-only. Use 'portal' so the desktop portal can capture a monitor/window without camera input.");
+    return;
+  }
+
   settings_.capture_video_source = std::move(source);
 
   if (SaveSettings()) {
@@ -390,7 +570,35 @@ void ClipDeckCore::SetCaptureVideoSource(std::string source) {
   }
 }
 
+void ClipDeckCore::SetCaptureAudioEnabled(bool enabled) {
+  settings_.capture_audio_enabled = enabled;
+  if (settings_.capture_audio_source.empty()) {
+    settings_.capture_audio_source = std::string(kAutomaticAudioSource);
+  }
+
+  if (SaveSettings()) {
+    Log(LogLevel::Info, kCoreContext,
+        "Capture audio " + std::string(enabled ? "enabled" : "disabled") +
+            ".");
+  }
+}
+
+void ClipDeckCore::SetCaptureAudioAuto() {
+  settings_.capture_audio_enabled = true;
+  settings_.capture_audio_source = std::string(kAutomaticAudioSource);
+
+  if (SaveSettings()) {
+    Log(LogLevel::Info, kCoreContext,
+        "Capture audio set to auto. The default output monitor will be resolved when recording starts.");
+  }
+}
+
 void ClipDeckCore::SetCaptureAudioSource(std::string source) {
+  if (source.empty()) {
+    source = std::string(kAutomaticAudioSource);
+  }
+
+  settings_.capture_audio_enabled = true;
   settings_.capture_audio_source = std::move(source);
 
   if (SaveSettings()) {

@@ -26,6 +26,8 @@ public:
   void SetSaveKeybind(std::string save_keybind);
   void SetBufferSafety(int seconds);
   void SetCaptureVideoSource(std::string source);
+  void SetCaptureAudioEnabled(bool enabled);
+  void SetCaptureAudioAuto();
   void SetCaptureAudioSource(std::string source);
   void SetCaptureSize(int width, int height);
   void SetCaptureFps(int fps);

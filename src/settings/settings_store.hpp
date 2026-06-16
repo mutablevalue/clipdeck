@@ -2,8 +2,11 @@
 
 #include <filesystem>
 #include <string>
+#include <string_view>
 
 namespace clipdeck {
+
+inline constexpr std::string_view kAutomaticAudioSource = "auto";
 
 struct ClipDeckSettings {
   int clip_length_seconds = 30;
@@ -11,7 +14,8 @@ struct ClipDeckSettings {
   std::string save_keybind = "Ctrl+Z+P";
   std::filesystem::path clip_directory = "output/clips";
   std::string capture_video_source = "portal";
-  std::string capture_audio_source;
+  bool capture_audio_enabled = true;
+  std::string capture_audio_source = std::string(kAutomaticAudioSource);
   int capture_width = 1920;
   int capture_height = 1080;
   int capture_fps = 60;

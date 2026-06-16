@@ -20,6 +20,7 @@ struct RecorderStatus {
 
 struct RecorderConfig {
   std::string video_source;
+  bool audio_enabled = true;
   std::string audio_source;
   int width = 1920;
   int height = 1080;

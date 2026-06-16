@@ -20,12 +20,16 @@ if(CLIPDECK_REQUIRE_GSTREAMER)
         gstreamer-1.0
         gstreamer-app-1.0
         gstreamer-pbutils-1.0
+        gio-2.0
+        gio-unix-2.0
     )
 else()
     pkg_check_modules(GSTREAMER IMPORTED_TARGET
         gstreamer-1.0
         gstreamer-app-1.0
         gstreamer-pbutils-1.0
+        gio-2.0
+        gio-unix-2.0
     )
 endif()
 
@@ -41,6 +45,7 @@ set(CLIPDECK_CORE_SOURCES
     src/recorder/gstreamer_recorder.cpp
     src/recorder/recorder_backend.cpp
     src/recorder/recorder_setup.cpp
+    src/recorder/segment_file.cpp
     src/settings/settings_store.cpp
     src/utils/command_runner.cpp
     src/utils/file_descriptor.cpp
@@ -92,6 +97,11 @@ target_link_libraries(clipdeck
 )
 
 if(BUILD_TESTING)
+    target_compile_definitions(clipdeck_core
+        PUBLIC
+            CLIPDECK_ENABLE_RECORDER_TEST_HOOKS
+    )
+
     find_package(GTest QUIET)
 
     if(NOT GTest_FOUND)
@@ -106,9 +116,14 @@ if(BUILD_TESTING)
     endif()
 
     add_executable(clipdeck_tests
+        src/tests/clip_muxer_test.cpp
+        src/tests/gstreamer_recorder_test.cpp
         src/tests/keybind_test.cpp
         src/tests/encoded_ring_buffer_test.cpp
         src/tests/number_parser_test.cpp
+        src/tests/recorder_backend_test.cpp
+        src/tests/recorder_setup_test.cpp
+        src/tests/runtime_paths_test.cpp
         src/tests/settings_store_test.cpp
         src/tests/string_utils_test.cpp
     )
