@@ -1,0 +1,169 @@
+#include "settings_store.hpp"
+
+#include "../utils/logger.hpp"
+#include "../utils/number_parser.hpp"
+
+#include <fstream>
+#include <string>
+#include <string_view>
+
+namespace {
+
+constexpr std::string_view kSettingsContext = "settings";
+
+std::pair<std::string, std::string> SplitSettingLine(std::string_view line) {
+  const std::size_t separator = line.find('=');
+
+  if (separator == std::string_view::npos) {
+    return {};
+  }
+
+  return {std::string(line.substr(0, separator)),
+          std::string(line.substr(separator + 1))};
+}
+
+} // namespace
+
+namespace clipdeck {
+
+SettingsStore::SettingsStore() : SettingsStore("output/settings.conf") {}
+
+SettingsStore::SettingsStore(std::filesystem::path settings_path)
+    : settings_path_(std::move(settings_path)) {}
+
+ClipDeckSettings SettingsStore::Load() const {
+  ClipDeckSettings settings;
+  std::ifstream input(settings_path_);
+
+  if (!input.is_open()) {
+    return settings;
+  }
+
+  std::string line;
+  while (std::getline(input, line)) {
+    const auto [key, value] = SplitSettingLine(line);
+
+    if (key == "clip_length_seconds") {
+      int seconds = 0;
+      if (ParsePositiveInteger(value, seconds)) {
+        settings.clip_length_seconds = seconds;
+      }
+      continue;
+    }
+
+    if (key == "buffer_safety_seconds") {
+      int seconds = 0;
+      if (ParsePositiveInteger(value, seconds)) {
+        settings.buffer_safety_seconds = seconds;
+      }
+      continue;
+    }
+
+    if (key == "save_keybind" && !value.empty()) {
+      settings.save_keybind = value;
+      continue;
+    }
+
+    if (key == "clip_directory" && !value.empty()) {
+      settings.clip_directory = value;
+      continue;
+    }
+
+    if (key == "capture_video_source" && !value.empty()) {
+      settings.capture_video_source = value;
+      continue;
+    }
+
+    if (key == "capture_audio_source") {
+      settings.capture_audio_source = value;
+      continue;
+    }
+
+    if (key == "capture_width") {
+      int width = 0;
+      if (ParsePositiveInteger(value, width)) {
+        settings.capture_width = width;
+      }
+      continue;
+    }
+
+    if (key == "capture_height") {
+      int height = 0;
+      if (ParsePositiveInteger(value, height)) {
+        settings.capture_height = height;
+      }
+      continue;
+    }
+
+    if (key == "capture_fps") {
+      int fps = 0;
+      if (ParsePositiveInteger(value, fps)) {
+        settings.capture_fps = fps;
+      }
+      continue;
+    }
+
+    if (key == "video_bitrate_kbps") {
+      int bitrate = 0;
+      if (ParsePositiveInteger(value, bitrate)) {
+        settings.video_bitrate_kbps = bitrate;
+      }
+      continue;
+    }
+
+    if (key == "audio_bitrate_kbps") {
+      int bitrate = 0;
+      if (ParsePositiveInteger(value, bitrate)) {
+        settings.audio_bitrate_kbps = bitrate;
+      }
+      continue;
+    }
+
+    if (key == "encoder" && !value.empty()) {
+      settings.encoder = value;
+      continue;
+    }
+
+  }
+
+  return settings;
+}
+
+bool SettingsStore::Save(const ClipDeckSettings &settings) const {
+  std::error_code error;
+  std::filesystem::create_directories(settings_path_.parent_path(), error);
+
+  if (error) {
+    Log(LogLevel::Error, kSettingsContext,
+        "Failed to create settings directory: " + error.message());
+    return false;
+  }
+
+  std::ofstream output(settings_path_, std::ios::trunc);
+
+  if (!output.is_open()) {
+    Log(LogLevel::Error, kSettingsContext, "Failed to open settings file.");
+    return false;
+  }
+
+  output << "clip_length_seconds=" << settings.clip_length_seconds << '\n';
+  output << "buffer_safety_seconds=" << settings.buffer_safety_seconds << '\n';
+  output << "save_keybind=" << settings.save_keybind << '\n';
+  output << "clip_directory=" << settings.clip_directory.string() << '\n';
+  output << "capture_video_source=" << settings.capture_video_source << '\n';
+  output << "capture_audio_source=" << settings.capture_audio_source << '\n';
+  output << "capture_width=" << settings.capture_width << '\n';
+  output << "capture_height=" << settings.capture_height << '\n';
+  output << "capture_fps=" << settings.capture_fps << '\n';
+  output << "video_bitrate_kbps=" << settings.video_bitrate_kbps << '\n';
+  output << "audio_bitrate_kbps=" << settings.audio_bitrate_kbps << '\n';
+  output << "encoder=" << settings.encoder << '\n';
+
+  return output.good();
+}
+
+const std::filesystem::path &SettingsStore::Path() const {
+  return settings_path_;
+}
+
+} // namespace clipdeck
